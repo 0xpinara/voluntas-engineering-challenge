@@ -47,6 +47,11 @@
   <type name="bytes32" primitiveType="uint8" length="32"/>
   <type name="address" primitiveType="uint8" length="20"/>
 
+  <!-- The shared Side domain enum owns and validates the Buy/Sell values. -->
+  <composite name="SideEncoding" description="Orderbook side: 0 = Buy (bid), 1 = Sell (ask)">
+    <type name="value" primitiveType="uint8"/>
+  </composite>
+
   <!-- FIX-standard boolean: one byte on the wire. -->
   <enum name="BooleanType" encodingType="uint8">
     <validValue name="False">0</validValue>

@@ -26,6 +26,10 @@ fn main() -> Result<()> {
         .with_domain_type(
             ConversionSelector::named_type("UTCTimestampMicrosEncoding"),
             "chrono::DateTime<chrono::Utc>",
+        )
+        .with_domain_type(
+            ConversionSelector::named_type("SideEncoding"),
+            "crate::Side",
         );
     generate_str_to_out_dir(&xml, config)?;
     Ok(())

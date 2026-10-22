@@ -1,4 +1,5 @@
 use chrono::DateTime;
+use engineering_challenge::Side;
 use engineering_challenge::util::dtos::challenge_orderbook::{
     AnyMessage, PriceLevelUpdateDomain, SnapshotAsksEntryDomain, SnapshotBidsEntryDomain,
     SnapshotDomain,
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<()> {
         exchange_timestamp: timestamp,
         price_level: 400_000,
         quantity: 1_250_000,
+        side: Side::Buy,
         symbol: symbol.clone(),
     };
 

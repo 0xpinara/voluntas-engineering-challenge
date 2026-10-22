@@ -2,6 +2,8 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::{InvalidSide, Side};
+
 macro_rules! schemas {
     ($($schema:ident),* $(,)?) => {$(
         pub mod $schema {
@@ -75,6 +77,22 @@ macro_rules! sbe_encode {
 }
 
 schemas!(challenge_orderbook);
+
+impl challenge_orderbook::TryFromSbe<challenge_orderbook::SideEncoding> for Side {
+    type Error = InvalidSide;
+
+    fn try_from_sbe(wire: challenge_orderbook::SideEncoding) -> Result<Self, Self::Error> {
+        Self::try_from(wire.value())
+    }
+}
+
+impl challenge_orderbook::TryToSbe<challenge_orderbook::SideEncoding> for Side {
+    type Error = std::convert::Infallible;
+
+    fn try_to_sbe(&self) -> Result<challenge_orderbook::SideEncoding, Self::Error> {
+        Ok(challenge_orderbook::SideEncoding::new(*self as u8))
+    }
+}
 
 sbe_encode!(
     challenge_orderbook::SnapshotDomain,
