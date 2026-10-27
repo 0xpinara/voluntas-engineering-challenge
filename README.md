@@ -45,15 +45,25 @@ Kalshi's demo environment. `--ws-url` overrides the endpoints. `run --help` list
   rule below lives in `collector/books.rs`; supervision of sockets and symbols is in
   `collector/mod.rs`.
 
-### Exact A/B arbitration (Extension 1)
+### Redundant sockets (Extension 1)
 
-Both venues name each book state identically on every connection. Kalshi uses `clock`, which its
-docs say "can match updates across redundant connections". Polymarket uses the book `hash`, which I
-verified empirically below. Each venue can split one transition across several messages that share
-that id, so a state is `(id, n)`: `n` messages of transition `id` have been applied.
+When a venue names each book state identically on every connection, the sockets are merged
+exactly. Polymarket does, with the book `hash` (verified below). Kalshi's docs say its `clock` does,
+and that it "can match updates across redundant connections"; Kalshi's **demo sends no `clock` at
+all** (found in the live test), so the collector handles both cases:
 
-The rule: **apply a replica's update to the output book only if, just before it, the replica was
-in exactly the output's state.** The consequences:
+- **With state names** (Polymarket; Kalshi when `clock` is present): exact first-arrival merging,
+  described below.
+- **Without them** (Kalshi's demo): each market follows one socket. When that socket dies, stalls
+  or falls more than 1 s behind the other one (judged by Kalshi's own `ts_ms`), the collector
+  switches to the other and writes a fresh **snapshot**, which is the challenge's rule. The other
+  socket is watched the same way and resubscribed if it falls behind.
+
+Each venue can split one transition across several messages that share its name, so a state is
+`(id, n)`: `n` messages of transition `id` have been applied.
+
+With state names, the rule is: **apply a replica's update to the output book only if, just before
+it, the replica was in exactly the output's state.** The consequences:
 
 - Whichever socket delivers an update **first** wins. The output's latency is the minimum over its
   sockets.
@@ -153,7 +163,10 @@ These are things a naive collector gets silently wrong.
 - **Polymarket closes a socket whose first frame isn't a subscription**, including a keepalive.
   It also restarts servers mid-session (`1001 server shutting down`). I saw both during the
   full-universe runs, and both were absorbed with no gap because the other replica kept the books.
-- **Kalshi's universe is about 145k open non-MVE markets.** Discovery streams a paginated scan
+- **Kalshi's demo sends no `clock`**, although the docs list it as required on every snapshot and
+  update and describe it as the way to match redundant connections. Parsing it as required, as
+  documented, rejected every message; this was found only by running live. See Extension 1 above.
+- **Kalshi's universe is about 145k open non-MVE markets** (226k on the demo). Discovery streams a paginated scan
   (subscriptions start with the first page), then polls `min_updated_ts` every 5 s, which is about
   135 status changes a minute in one request. Opening a market bumps its `updated_time` (true for
   all 215 markets that opened in one 15-minute sample), so new markets are subscribed within 5 s of
@@ -170,7 +183,8 @@ These are things a naive collector gets silently wrong.
   Kalshi's protocol (`sid`, `seq`, `clock`, `update_subscription`). It runs 20 markets on 4
   sockets, with one lagging, one losing a message (seq gap), one cut mid-stream, and one silently
   stalling a market. The output, replayed, must equal the exchange's final books **exactly**. It
-  does, every run.
+  does, every run, both with `clock` (exact merging) and without it, as Kalshi's demo behaves
+  (26 socket switches in one run, each announced with a snapshot).
 - **Live Polymarket, 300 busy assets:** 0 mismatches, and 1,224/1,224 periodic snapshots equal to
   the replayed updates (current v2 format).
 - **Live Polymarket, full universe:** 265–305k assets on 214–244 sockets, 35–40k events/s, about
@@ -185,12 +199,16 @@ These are things a naive collector gets silently wrong.
   accidental version of this test (the laptop slept for six hours mid-run) is what exposed the
   timeout feedback loop that backpressure-aware supervision now prevents: 438k needless
   resyncs then, 1.8k now.
-- **Live Kalshi, without a key:** full discovery runs against production. Signed handshakes made
-  with a throwaway key reach both hosts and are rejected with `401`, which is the expected answer.
+- **Live Kalshi (demo environment, Ed25519 API key), 3.5 minutes:** discovered and synced all
+  226,227 open non-MVE markets on 182 sockets (both of Kalshi's hosts), with 0 socket drops and 0
+  mismatches, and wrote about 2,150 live updates a second. It dropped markets as they closed, and
+  once switched a market to its other socket with a snapshot when the first fell behind.
+  `verify`: 445,136 updates, and **all 719,138 periodic snapshots equal the replayed updates**,
+  with 0 orphan updates, no-op removals, crossed books or timestamp regressions.
 
-**Not verified:** live Kalshi order book data, because I had no API key. That path is covered by
-the mock exchange, the documented examples and the signing tests. It's the first thing to run with
-a key: `run --demo` with a demo key.
+**Not verified:** Kalshi *production* order books. A production account requires a US Social
+Security Number, so I tested on Kalshi's demo, which runs the same API on Kalshi's servers with
+play money. Production runs the same way, without `--demo`.
 
 ## Limits and next steps
 

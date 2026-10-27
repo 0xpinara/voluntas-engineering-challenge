@@ -4,7 +4,9 @@
 //!   socket 1: delivers everything late, in 40ms batches (a lagging replica)
 //!   socket 2: drops one message, leaving a seq gap
 //!   socket 3: is cut abruptly mid-stream
-//! The output, replayed like a backtest, must reproduce the exchange's final books exactly.
+//! The output, replayed like a backtest, must reproduce the exchange's final books exactly. It
+//! runs twice: with Kalshi's documented `clock` (exact merging of the sockets), and without it, as
+//! Kalshi's demo actually behaves (one socket per market, switching with a snapshot).
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -33,6 +35,7 @@ const MARKETS: usize = 20;
 /// The exchange: per market, YES and NO bid ladders in cents -> fixed point contracts.
 #[derive(Default)]
 struct Exchange {
+    clocks: bool,
     clock: HashMap<String, u64>,
     yes: HashMap<String, BTreeMap<i64, i64>>,
     no: HashMap<String, BTreeMap<i64, i64>>,
@@ -68,6 +71,14 @@ impl Exchange {
         };
         json!({"market_ticker": t, "market_id": "x", "clock": self.clock.get(t).copied().unwrap_or(0),
                "yes_dollars_fp": side(&self.yes[t]), "no_dollars_fp": side(&self.no[t])})
+    }
+
+    /// Kalshi's demo sends no `clock`; with `clocks` off the mock does the same.
+    fn publish(&self, mut msg: Value) -> Value {
+        if !self.clocks {
+            msg.as_object_mut().unwrap().remove("clock");
+        }
+        msg
     }
 
     /// The YES-centric book the collector should publish.
@@ -181,7 +192,7 @@ async fn socket(
                     stalled.remove(&n);
                     subs.insert(n.clone(), ex.clock[&n]);
                     seq += 1;
-                    outbox.push(json!({"type": "orderbook_snapshot", "sid": sid, "seq": seq, "msg": ex.snapshot(&n)}).to_string());
+                    outbox.push(json!({"type": "orderbook_snapshot", "sid": sid, "seq": seq, "msg": ex.publish(ex.snapshot(&n))}).to_string());
                 }
                 k != 1
             }
@@ -195,9 +206,10 @@ async fn socket(
                     if k == 0 && sent == 400 { stalled.insert(d.ticker.clone()); } // fault: silent stall from here on
                     if k == 2 && sent == 300 { continue; }                         // fault: lost message
                     if k == 3 && born.elapsed() > Duration::from_millis(1500) { return Ok(()); } // fault: cut
-                    outbox.push(json!({"type": "orderbook_delta", "sid": sid, "seq": seq, "msg": {
-                        "market_ticker": d.ticker, "market_id": "x", "clock": d.clock, "price_dollars": dollars(d.cents),
-                        "delta_fp": contracts(d.delta), "side": if d.yes { "yes" } else { "no" }, "ts_ms": 1_700_000_000_000i64 }}).to_string());
+                    let msg = json!({"market_ticker": d.ticker, "market_id": "x", "clock": d.clock, "price_dollars": dollars(d.cents),
+                        "delta_fp": contracts(d.delta), "side": if d.yes { "yes" } else { "no" }, "ts_ms": chrono::Utc::now().timestamp_millis()});
+                    let msg = ex.lock().unwrap().publish(msg);
+                    outbox.push(json!({"type": "orderbook_delta", "sid": sid, "seq": seq, "msg": msg}).to_string());
                 }
                 k != 1
             }
@@ -213,9 +225,21 @@ async fn socket(
 
 #[test]
 fn survives_faults_and_reproduces_the_exchange_exactly() {
+    scenario(true);
+}
+
+#[test]
+fn survives_faults_without_exchange_clocks() {
+    scenario(false);
+}
+
+fn scenario(clocks: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let ex = Arc::new(Mutex::new(Exchange::default()));
+    let ex = Arc::new(Mutex::new(Exchange {
+        clocks,
+        ..Exchange::default()
+    }));
     for t in tickers() {
         let mut e = ex.lock().unwrap();
         e.clock.insert(t.clone(), 1000);

@@ -335,7 +335,7 @@ impl Session for KalshiSession {
         let msg = f.msg.map_or("null", RawValue::get);
         match f.kind {
             "orderbook_snapshot" => {
-                let s: Snapshot = serde_json::from_str(msg)?;
+                let s: Snapshot = parse(f.kind, msg)?;
                 let side = |v: &[(&str, &str)], no: bool| -> anyhow::Result<Vec<(i64, i64)>> {
                     v.iter()
                         .map(|(p, q)| Ok((if no { ONE - fixed(p)? } else { fixed(p)? }, fixed(q)?)))
@@ -344,7 +344,7 @@ impl Session for KalshiSession {
                 events.push(Event::Book {
                     head: Head {
                         sym: s.market_ticker.into(),
-                        seq: Seq::Clock(s.clock),
+                        seq: s.clock.map_or(Seq::None, Seq::Clock),
                         ts: sent,
                     },
                     bids: side(&s.yes_dollars_fp, false)?,
@@ -352,7 +352,7 @@ impl Session for KalshiSession {
                 });
             }
             "orderbook_delta" => {
-                let d: Delta = serde_json::from_str(msg)?;
+                let d: Delta = parse(f.kind, msg)?;
                 let (px, qty) = (fixed(d.price_dollars)?, fixed(d.delta_fp)?);
                 let level = match d.side {
                     "yes" => Level {
@@ -370,7 +370,7 @@ impl Session for KalshiSession {
                 events.push(Event::Delta {
                     head: Head {
                         sym: d.market_ticker.into(),
-                        seq: Seq::Clock(d.clock),
+                        seq: d.clock.map_or(Seq::None, Seq::Clock),
                         ts: d.ts_ms.and_then(from_millis).or(sent),
                     },
                     rel: true,
@@ -378,7 +378,7 @@ impl Session for KalshiSession {
                 });
             }
             "subscribed" => {
-                let s: Subscribed = serde_json::from_str(msg)?;
+                let s: Subscribed = parse(f.kind, msg)?;
                 if s.channel == "orderbook_delta" {
                     (self.sid, self.subscribing) = (Some(s.sid), None);
                     for (add, syms) in std::mem::take(&mut self.queued) {
@@ -387,7 +387,7 @@ impl Session for KalshiSession {
                 }
             }
             "error" => {
-                let e: Error = serde_json::from_str(msg)?;
+                let e: Error = parse(f.kind, msg)?;
                 if f.id.is_some() && f.id == self.subscribing {
                     self.subscribing = None; // the next subscribe opens a fresh subscription
                 }
@@ -405,6 +405,10 @@ impl Session for KalshiSession {
     }
 }
 
+fn parse<'a, T: Deserialize<'a>>(kind: &str, msg: &'a str) -> anyhow::Result<T> {
+    serde_json::from_str(msg).with_context(|| format!("bad {kind} {msg:.300}"))
+}
+
 #[derive(Deserialize)]
 struct Frame<'a> {
     #[serde(rename = "type")]
@@ -420,7 +424,8 @@ struct Frame<'a> {
 #[derive(Deserialize)]
 struct Snapshot<'a> {
     market_ticker: &'a str,
-    clock: u64,
+    /// Documented as required on both messages; Kalshi's demo sends it on neither.
+    clock: Option<u64>,
     #[serde(default, borrow)]
     yes_dollars_fp: Vec<(&'a str, &'a str)>,
     #[serde(default, borrow)]
@@ -430,7 +435,7 @@ struct Snapshot<'a> {
 #[derive(Deserialize)]
 struct Delta<'a> {
     market_ticker: &'a str,
-    clock: u64,
+    clock: Option<u64>,
     price_dollars: &'a str,
     delta_fp: &'a str,
     side: &'a str,
@@ -486,9 +491,15 @@ mod tests {
             }]
         );
         assert_eq!(head.ts.unwrap().timestamp_millis(), 1669149841000);
+        // Kalshi's demo sends no clock at all: those states have no shared name.
+        let ev = decode(&mut s, r#"{"type":"orderbook_delta","sid":2,"seq":4,"msg":{"market_ticker":"FED-23DEC-T3.00","price_dollars":"0.3900","delta_fp":"-10.00","side":"no","ts_ms":1793126658365}}"#).unwrap();
+        let Event::Delta { head, levels, .. } = &ev[0] else {
+            panic!()
+        };
+        assert_eq!((head.seq, levels[0].px), (Seq::None, 610_000));
         // Gaps are fatal for the socket, unknown types are not.
-        assert!(decode(&mut s, r#"{"type":"something_new","sid":2,"seq":4}"#).is_ok());
-        assert!(decode(&mut s, r#"{"type":"ok","sid":2,"seq":6,"id":9}"#).is_err());
+        assert!(decode(&mut s, r#"{"type":"something_new","sid":2,"seq":5}"#).is_ok());
+        assert!(decode(&mut s, r#"{"type":"ok","sid":2,"seq":7,"id":9}"#).is_err());
     }
 
     #[test]

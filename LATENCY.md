@@ -35,7 +35,7 @@ assets and splits the run in halves:
 The fastest socket stays fastest, so a connection's backend placement sticks for its lifetime.
 "Spam connections until you find a fast one" is therefore a real effect on Polymarket, not noise.
 
-**At full scale, inside the collector** (305k assets, 244 sockets, two per shard), from the
+**At full scale, inside the collector** (Polymarket: 305k assets, 244 sockets, two per shard), from the
 `race` field of the stats line: the two slots split wins about 50/50. When a socket lost the race
 it was behind by p50 **0.4–0.7 ms**, p90 **6–12 ms** and p99 **46–185 ms**. First-arrival
 arbitration means the output pays none of that: each update goes out at the minimum over its
@@ -49,8 +49,11 @@ rather than picking one.
 
 ## 3. What the collector does with this
 
-- **First arrival wins, exactly.** Arbitration is keyed on the exchange's own state names, so
-  taking the earliest copy of each update never risks applying one twice or skipping one.
+- **First arrival wins, exactly,** where the venue names its states (Polymarket's `hash`;
+  Kalshi's `clock` when sent). Taking the earliest copy of each update then never risks applying
+  one twice or skipping one. Kalshi's demo sends no `clock`, so there each market follows one
+  socket and its latency is that socket's; picking the faster socket per market from the measured
+  lag is the natural next step.
 - **Timestamps come first.** The receive time is taken the moment the websocket yields a frame,
   before JSON parsing. Book work happens on another thread, and SBE encoding and disk on a third.
   `TCP_NODELAY` is set on every socket.

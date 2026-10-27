@@ -11,6 +11,7 @@
 
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
     time::{Duration, Instant},
 };
 
@@ -34,13 +35,27 @@ pub(super) struct State {
     done: bool,
 }
 
+/// `n` of a state only one socket can name: the venue sent neither clock nor hash, so an output
+/// seeded from that socket follows it alone.
+const PRIVATE: u32 = u32::MAX;
+
 impl State {
     fn snapshot(seq: Seq) -> Self {
-        let (Seq::Clock(id) | Seq::Hash(id)) = seq;
-        Self {
-            id,
-            n: 0,
-            done: true,
+        match seq {
+            Seq::Clock(id) | Seq::Hash(id) => Self {
+                id,
+                n: 0,
+                done: true,
+            },
+            // Unique per snapshot, counting down from the top so it never equals a real clock.
+            Seq::None => {
+                static NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
+                Self {
+                    id: NEXT.fetch_sub(1, Relaxed),
+                    n: PRIVATE,
+                    done: true,
+                }
+            }
         }
     }
 }
@@ -51,7 +66,20 @@ fn advance(s: State, seq: Seq) -> Option<(State, State)> {
     let (id, ordered) = match seq {
         Seq::Clock(c) => (c, true),
         Seq::Hash(h) => (h, false),
+        // An unnamed update leaves a private state as it is; an unnamed update after named
+        // ones means the stream is inconsistent.
+        Seq::None => return (s.n == PRIVATE).then_some((s, s)),
     };
+    if s.n == PRIVATE {
+        return Some((
+            s,
+            State {
+                id,
+                n: 1,
+                done: false,
+            },
+        )); // the venue started naming states
+    }
     match (id == s.id, s.done) {
         (true, false) => Some((s, State { n: s.n + 1, ..s })),
         // Polymarket can send the tail of a transition after a full book of it: redundant.
@@ -82,7 +110,7 @@ fn follows(cur: State, prev: State) -> bool {
 fn progress(seq: Seq, ts: Option<DateTime<Utc>>, prev: u64) -> u64 {
     match seq {
         Seq::Clock(c) => c,
-        Seq::Hash(_) => ts.map_or(prev, |t| t.timestamp_millis().max(0) as u64),
+        Seq::Hash(_) | Seq::None => ts.map_or(prev, |t| t.timestamp_millis().max(0) as u64),
     }
 }
 
@@ -212,7 +240,13 @@ impl<V: Venue> Collector<V> {
                 c.pending = c.pending.saturating_sub(1);
             }
         }
-        (r.book, r.progress, r.ts) = (book, progress(seq, ts, r.progress), ts.or(r.ts));
+        // An unnamed snapshot can't be placed in time: take it as current as the output.
+        let p = if seq == Seq::None {
+            m.progress
+        } else {
+            progress(seq, ts, r.progress)
+        };
+        (r.book, r.progress, r.ts) = (book, p, ts.or(r.ts));
         (r.mark, r.since, r.synced) = (r.progress.max(m.progress), at, at);
         // A snapshot requested after the output reached `floor` can't be older than it within
         // one clock epoch, so an older one means the exchange restarted its clocks (Kalshi
@@ -450,6 +484,21 @@ mod tests {
         assert!(advance(st(12, 3, false), Seq::Clock(11)).is_none());
         // Mid-action deltas are duplicates for an output holding the complete clock.
         assert!(!follows(st(12, 0, true), st(12, 1, false)));
+    }
+
+    #[test]
+    fn unnamed_states_follow_one_socket() {
+        // Two sockets' snapshots of the same book get different private names.
+        let (a, b) = (State::snapshot(Seq::None), State::snapshot(Seq::None));
+        assert_ne!(a.id, b.id);
+        // An output seeded from socket A follows A's unnamed updates, never B's.
+        let (pa, na) = advance(a, Seq::None).unwrap();
+        let (pb, _) = advance(b, Seq::None).unwrap();
+        assert!(follows(a, pa) && na == a && !follows(a, pb));
+        // If the venue starts naming states, the next update opens a named one...
+        assert_eq!(advance(a, Seq::Clock(7)).unwrap().1, st(7, 1, false));
+        // ...and an unnamed update after named ones means the stream is inconsistent.
+        assert!(advance(st(7, 1, false), Seq::None).is_none());
     }
 
     #[test]

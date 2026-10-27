@@ -37,6 +37,10 @@ pub enum Seq {
     Clock(u64),
     /// Hash of the book state the message produces (Polymarket).
     Hash(u64),
+    /// No name other connections would share (Kalshi's demo sends no `clock`). The collector
+    /// then follows one socket per symbol, and switches to another with a snapshot when that
+    /// socket dies, stalls or falls behind.
+    None,
 }
 
 /// What every book message carries: the symbol, the exchange's name for the resulting state,
